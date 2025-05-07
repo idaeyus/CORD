@@ -1,0 +1,642 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>Image Segmentation via Compression</title>
+    <script src="https://cdnjs.cloudflare.com/ajax/libs/pako/2.1.0/pako.min.js"></script>
+    <script src="https://cdnjs.cloudflare.com/ajax/libs/mathjs/12.0.0/math.min.js"></script>
+    <style>
+        body {
+            font-family: Arial, sans-serif;
+            max-width: 1200px;
+            margin: 0 auto;
+            padding: 20px;
+        }
+        .container {
+            display: flex;
+            flex-direction: column;
+            gap: 20px;
+        }
+        .controls {
+            display: flex;
+            flex-wrap: wrap;
+            gap: 20px;
+            align-items: center;
+            margin-bottom: 20px;
+        }
+        .image-container {
+            display: flex;
+            flex-wrap: wrap;
+            gap: 20px;
+        }
+        .image-wrapper {
+            flex: 1;
+            min-width: 300px;
+        }
+        canvas {
+            max-width: 100%;
+            height: auto;
+            border: 1px solid #ddd;
+        }
+        .slider-container {
+            display: flex;
+            flex-direction: column;
+            width: 200px;
+        }
+        button {
+            padding: 8px 16px;
+            background-color: #4CAF50;
+            color: white;
+            border: none;
+            border-radius: 4px;
+            cursor: pointer;
+        }
+        button:hover {
+            background-color: #45a049;
+        }
+        input[type="file"] {
+            margin-right: 10px;
+        }
+        .legend {
+            display: flex;
+            flex-wrap: wrap;
+            gap: 10px;
+            margin-top: 10px;
+        }
+        .legend-item {
+            display: flex;
+            align-items: center;
+            margin-right: 15px;
+            cursor: pointer;
+            padding: 5px;
+            border-radius: 3px;
+            transition: background-color 0.2s;
+        }
+        .legend-item:hover {
+            background-color: #f0f0f0;
+        }
+        .legend-color {
+            width: 20px;
+            height: 20px;
+            margin-right: 5px;
+            border: 1px solid #ccc;
+        }
+        .download-icon {
+            margin-left: 5px;
+            cursor: pointer;
+            color: #4CAF50;
+            font-weight: bold;
+        }
+        .interactive-panel {
+            margin-top: 30px;
+        }
+        .interactive-panel h3 {
+            margin-bottom: 10px;
+        }
+        .interactive-panel p {
+            margin-bottom: 15px;
+        }
+        #interactiveCanvas {
+            cursor: pointer;
+        }
+        .results-panel {
+            display: none;
+            margin-top: 20px;
+        }
+    </style>
+</head>
+<body>
+    <h1>CoRD : Compression Oriented Regional Division</h1>
+    
+    <div class="container">
+        <div class="controls">
+            <input type="file" id="imageInput" accept="image/*">
+            <button id="processBtn">Process Image</button>
+            
+            <div class="slider-container">
+                <label for="blockSize">Block Size: <span id="blockSizeValue">16</span>px</label>
+                <input type="range" id="blockSize" min="4" max="32" value="16" step="4">
+            </div>
+            
+            <div class="slider-container">
+                <label for="clusterCount">Number of Clusters: <span id="clusterCountValue">5</span></label>
+                <input type="range" id="clusterCount" min="2" max="10" value="5">
+            </div>
+
+            <div class="slider-container">
+                <label for="compressionMethod">Compression Method:</label>
+                <select id="compressionMethod">
+                    <option value="deflate">Deflate</option>
+                    <option value="dct">DCT (JPEG-like)</option>
+                    <option value="entropy">Entropy</option>
+                </select>
+            </div>
+        </div>
+        
+        <div class="image-container">
+            <div class="image-wrapper">
+                <h3>Original Image</h3>
+                <canvas id="originalCanvas"></canvas>
+            </div>
+            <div class="image-wrapper">
+                <h3>Segmentation Map</h3>
+                <canvas id="segmentationCanvas"></canvas>
+            </div>
+            <div class="image-wrapper">
+                <h3>Solid Color Overlay</h3>
+                <canvas id="solidColorCanvas"></canvas>
+                <div class="legend" id="colorLegend"></div>
+            </div>
+        </div>
+        
+        <div class="results-panel" id="resultsPanel">
+            <div class="interactive-panel">
+                <h3>Interactive Segment Viewer</h3>
+                <p>Click on the image to reveal segments</p>
+                <div class="image-wrapper">
+                    <canvas id="interactiveCanvas"></canvas>
+                </div>
+            </div>
+        </div>
+    </div>
+
+    <script>
+       const imageInput = document.getElementById('imageInput');
+        const processBtn = document.getElementById('processBtn');
+        const blockSizeSlider = document.getElementById('blockSize');
+        const blockSizeValue = document.getElementById('blockSizeValue');
+        const clusterCountSlider = document.getElementById('clusterCount');
+        const clusterCountValue = document.getElementById('clusterCountValue');
+        const compressionMethodSelect = document.getElementById('compressionMethod');
+        const originalCanvas = document.getElementById('originalCanvas');
+        const segmentationCanvas = document.getElementById('segmentationCanvas');
+        const solidColorCanvas = document.getElementById('solidColorCanvas');
+        const colorLegend = document.getElementById('colorLegend');
+        const resultsPanel = document.getElementById('resultsPanel');
+        const interactiveCanvas = document.getElementById('interactiveCanvas');
+		
+        let currentImage = null;
+        let segmentationData = null;
+        let blockSize = 16;
+        let clusterCount = 5;
+
+        blockSizeSlider.addEventListener('input', () => {
+            blockSizeValue.textContent = blockSizeSlider.value;
+        });
+        
+        clusterCountSlider.addEventListener('input', () => {
+            clusterCountValue.textContent = clusterCountSlider.value;
+        });
+
+        processBtn.addEventListener('click', () => {
+            const file = imageInput.files[0];
+            if (!file) {
+                alert('Please select an image first.');
+                return;
+            }
+            
+            const reader = new FileReader();
+            reader.onload = (e) => {
+                const img = new Image();
+                img.onload = () => {
+                    currentImage = img;
+
+                    originalCanvas.width = img.width;
+                    originalCanvas.height = img.height;
+                    const originalCtx = originalCanvas.getContext('2d');
+                    originalCtx.drawImage(img, 0, 0);
+
+                    processImage(img);
+
+                    resultsPanel.style.display = 'block';
+
+                    setupInteractiveCanvas(img);
+                };
+                img.src = e.target.result;
+            };
+            reader.readAsDataURL(file);
+        });
+
+        function setupInteractiveCanvas(img) {
+            interactiveCanvas.width = img.width;
+            interactiveCanvas.height = img.height;
+            const ctx = interactiveCanvas.getContext('2d');
+            ctx.drawImage(img, 0, 0);
+
+            interactiveCanvas.addEventListener('click', handleCanvasClick);
+        }
+
+        function handleCanvasClick(e) {
+            if (!segmentationData || !currentImage) return;
+            
+            const rect = interactiveCanvas.getBoundingClientRect();
+            const scaleX = interactiveCanvas.width / rect.width;
+            const scaleY = interactiveCanvas.height / rect.height;
+            
+            const x = Math.floor((e.clientX - rect.left) * scaleX);
+            const y = Math.floor((e.clientY - rect.top) * scaleY);
+
+            const blockX = Math.floor(x / blockSize);
+            const blockY = Math.floor(y / blockSize);
+
+            const blocksX = Math.floor(currentImage.width / blockSize);
+            const blockIndex = blockY * blocksX + blockX;
+            
+            if (blockIndex >= 0 && blockIndex < segmentationData.clusters.length) {
+                const segmentIndex = segmentationData.clusters[blockIndex];
+                highlightSegment(segmentIndex);
+            }
+        }
+
+        function highlightSegment(segmentIndex) {
+            if (!segmentationData || !currentImage) return;
+            
+            const ctx = interactiveCanvas.getContext('2d');
+
+            ctx.drawImage(currentImage, 0, 0);
+
+            ctx.globalAlpha = 0.7;
+            
+            const blocksX = Math.floor(currentImage.width / blockSize);
+            const blocksY = Math.floor(currentImage.height / blockSize);
+
+            ctx.fillStyle = 'rgba(255, 255, 0, 0.5)'; // Yellow highlight
+
+            for (let i = 0; i < segmentationData.clusters.length; i++) {
+                if (segmentationData.clusters[i] === segmentIndex) {
+                    const blockX = i % blocksX;
+                    const blockY = Math.floor(i / blocksX);
+                    
+                    ctx.fillRect(
+                        blockX * blockSize,
+                        blockY * blockSize,
+                        blockSize,
+                        blockSize
+                    );
+                }
+            }
+            
+            ctx.globalAlpha = 1.0;
+        }
+
+        function processImage(img) {
+            blockSize = parseInt(blockSizeSlider.value);
+            clusterCount = parseInt(clusterCountSlider.value);
+            const compressionMethod = compressionMethodSelect.value;
+
+            segmentationCanvas.width = img.width;
+            segmentationCanvas.height = img.height;
+            const segCtx = segmentationCanvas.getContext('2d');
+
+            solidColorCanvas.width = img.width;
+            solidColorCanvas.height = img.height;
+            const solidCtx = solidColorCanvas.getContext('2d');
+
+            segCtx.drawImage(img, 0, 0);
+
+            solidCtx.drawImage(img, 0, 0);
+
+            const originalCtx = originalCanvas.getContext('2d');
+            const imageData = originalCtx.getImageData(0, 0, img.width, img.height);
+
+            const blocksX = Math.floor(img.width / blockSize);
+            const blocksY = Math.floor(img.height / blockSize);
+
+            const compressionScores = [];
+            
+            for (let y = 0; y < blocksY; y++) {
+                for (let x = 0; x < blocksX; x++) {
+                    const blockData = getBlockData(imageData, x, y, blockSize);
+                    let score;
+                    
+                    switch(compressionMethod) {
+                        case 'deflate':
+                            score = deflateCompressionScore(blockData);
+                            break;
+                        case 'dct':
+                            score = dctCompressionScore(blockData);
+                            break;
+                        case 'entropy':
+                            score = entropyScore(blockData);
+                            break;
+                        default:
+                            score = deflateCompressionScore(blockData);
+                    }
+                    
+                    compressionScores.push({
+                        x: x,
+                        y: y,
+                        score: score
+                    });
+                }
+            }
+
+            const clusters = kMeansClustering(compressionScores, clusterCount);
+
+            segmentationData = {
+                blocksX: blocksX,
+                blocksY: blocksY,
+                clusters: clusters,
+                compressionScores: compressionScores
+            };
+
+            const colors = generateColors(clusterCount);
+
+            const solidColors = generateSolidColors(clusterCount);
+
+            for (let i = 0; i < compressionScores.length; i++) {
+                const block = compressionScores[i];
+                const clusterIndex = clusters[i];
+                const color = colors[clusterIndex];
+                
+                segCtx.fillStyle = color;
+                segCtx.fillRect(
+                    block.x * blockSize,
+                    block.y * blockSize,
+                    blockSize,
+                    blockSize
+                );
+            }
+
+            segCtx.globalAlpha = 0.6;
+            segCtx.drawImage(img, 0, 0);
+            segCtx.globalAlpha = 1.0;
+
+            for (let i = 0; i < compressionScores.length; i++) {
+                const block = compressionScores[i];
+                const clusterIndex = clusters[i];
+                const solidColor = solidColors[clusterIndex];
+                
+                solidCtx.fillStyle = solidColor;
+                solidCtx.fillRect(
+                    block.x * blockSize,
+                    block.y * blockSize,
+                    blockSize,
+                    blockSize
+                );
+            }
+
+            createColorLegend(solidColors);
+        }
+
+        function createColorLegend(colors) {
+            colorLegend.innerHTML = '';
+
+            for (let i = 0; i < colors.length; i++) {
+                const legendItem = document.createElement('div');
+                legendItem.className = 'legend-item';
+                
+                const colorBox = document.createElement('div');
+                colorBox.className = 'legend-color';
+                colorBox.style.backgroundColor = colors[i];
+                
+                const label = document.createElement('span');
+                label.textContent = `Segment ${i + 1}`;
+                
+                const downloadLink = document.createElement('span');
+                downloadLink.className = 'download-icon';
+                downloadLink.textContent = '⬇';
+                downloadLink.title = 'Download this segment';
+                downloadLink.addEventListener('click', () => downloadSegment(i));
+                
+                legendItem.appendChild(colorBox);
+                legendItem.appendChild(label);
+                legendItem.appendChild(downloadLink);
+
+                legendItem.addEventListener('click', (e) => {
+                    if (e.target !== downloadLink) {
+                        highlightSegment(i);
+                    }
+                });
+                
+                colorLegend.appendChild(legendItem);
+            }
+        }
+
+        function downloadSegment(segmentIndex) {
+            if (!segmentationData || !currentImage) return;
+
+            const segmentCanvas = document.createElement('canvas');
+            segmentCanvas.width = currentImage.width;
+            segmentCanvas.height = currentImage.height;
+            const ctx = segmentCanvas.getContext('2d', { willReadFrequently: true });
+
+            ctx.drawImage(currentImage, 0, 0);
+
+            const imageData = ctx.getImageData(0, 0, segmentCanvas.width, segmentCanvas.height);
+            const data = imageData.data;
+
+            const blocksX = segmentationData.blocksX;
+
+            for (let i = 0; i < segmentationData.clusters.length; i++) {
+                if (segmentationData.clusters[i] !== segmentIndex) {
+                    const blockX = i % blocksX;
+                    const blockY = Math.floor(i / blocksX);
+
+                    for (let y = 0; y < blockSize; y++) {
+                        for (let x = 0; x < blockSize; x++) {
+                            const pixelX = blockX * blockSize + x;
+                            const pixelY = blockY * blockSize + y;
+
+                            if (pixelX >= currentImage.width || pixelY >= currentImage.height) {
+                                continue;
+                            }
+                            
+                            const pixelIndex = (pixelY * currentImage.width + pixelX) * 4;
+                            data[pixelIndex + 3] = 0; // Set alpha to 0 (transparent)
+                        }
+                    }
+                }
+            }
+
+            ctx.putImageData(imageData, 0, 0);
+
+            const downloadLink = document.createElement('a');
+            downloadLink.download = `segment_${segmentIndex + 1}.png`;
+            downloadLink.href = segmentCanvas.toDataURL('image/png');
+            downloadLink.click();
+        }
+
+        function getBlockData(imageData, blockX, blockY, blockSize) {
+            const blockData = new Uint8Array(blockSize * blockSize * 4);
+            let index = 0;
+            
+            for (let y = 0; y < blockSize; y++) {
+                for (let x = 0; x < blockSize; x++) {
+                    const pixelX = blockX * blockSize + x;
+                    const pixelY = blockY * blockSize + y;
+                    const pixelIndex = (pixelY * imageData.width + pixelX) * 4;
+
+                    if (pixelX >= imageData.width || pixelY >= imageData.height) {
+                        blockData[index++] = 0;
+                        blockData[index++] = 0;
+                        blockData[index++] = 0;
+                        blockData[index++] = 0;
+                        continue;
+                    }
+                    
+                    blockData[index++] = imageData.data[pixelIndex];     // R
+                    blockData[index++] = imageData.data[pixelIndex + 1]; // G
+                    blockData[index++] = imageData.data[pixelIndex + 2]; // B
+                    blockData[index++] = imageData.data[pixelIndex + 3]; // A
+                }
+            }
+            
+            return blockData;
+        }
+
+        function deflateCompressionScore(data) {
+            const compressed = pako.deflate(data);
+            return compressed.length / data.length;
+        }
+
+        function dctCompressionScore(data) {
+            const grayscale = new Float64Array(data.length / 4);
+            for (let i = 0, j = 0; i < data.length; i += 4, j++) {
+                grayscale[j] = 0.299 * data[i] + 0.587 * data[i + 1] + 0.114 * data[i + 2];
+            }
+
+            const size = Math.sqrt(grayscale.length);
+            const matrix = [];
+            for (let i = 0; i < size; i++) {
+                matrix[i] = Array.from(grayscale.slice(i * size, (i + 1) * size));
+            }
+
+            const dct = math.dct(matrix);
+
+            let lowFreqEnergy = 0;
+            let highFreqEnergy = 0;
+            
+            for (let y = 0; y < size; y++) {
+                for (let x = 0; x < size; x++) {
+                    const freq = x + y;
+                    const energy = Math.abs(dct[y][x]);
+                    
+                    if (freq < size / 2) {
+                        lowFreqEnergy += energy;
+                    } else {
+                        highFreqEnergy += energy;
+                    }
+                }
+            }
+
+            return highFreqEnergy / (lowFreqEnergy + 1e-10);
+        }
+
+        function entropyScore(data) {
+            const grayscale = new Uint8Array(data.length / 4);
+            for (let i = 0, j = 0; i < data.length; i += 4, j++) {
+                grayscale[j] = Math.floor(0.299 * data[i] + 0.587 * data[i + 1] + 0.114 * data[i + 2]);
+            }
+
+            const histogram = new Array(256).fill(0);
+            for (let i = 0; i < grayscale.length; i++) {
+                histogram[grayscale[i]]++;
+            }
+            
+            // Calculate entropy
+            let entropy = 0;
+            for (let i = 0; i < 256; i++) {
+                const probability = histogram[i] / grayscale.length;
+                if (probability > 0) {
+                    entropy -= probability * Math.log2(probability);
+                }
+            }
+            
+            return entropy;
+        }
+
+        function kMeansClustering(data, k) {
+            const scores = data.map(item => item.score);
+
+            const min = Math.min(...scores);
+            const max = Math.max(...scores);
+            let centroids = [];
+            
+            for (let i = 0; i < k; i++) {
+                centroids.push(min + (i / (k - 1)) * (max - min));
+            }
+
+            const maxIterations = 100;
+            const threshold = 0.0001;
+            let iterations = 0;
+            let moved = true;
+
+            let clusters = new Array(data.length);
+
+            while (moved && iterations < maxIterations) {
+                moved = false;
+                iterations++;
+
+                for (let i = 0; i < data.length; i++) {
+                    const score = scores[i];
+                    let minDistance = Infinity;
+                    let closestCluster = 0;
+                    
+                    for (let j = 0; j < k; j++) {
+                        const distance = Math.abs(score - centroids[j]);
+                        if (distance < minDistance) {
+                            minDistance = distance;
+                            closestCluster = j;
+                        }
+                    }
+                    
+                    if (clusters[i] !== closestCluster) {
+                        clusters[i] = closestCluster;
+                        moved = true;
+                    } else {
+                        clusters[i] = closestCluster;
+                    }
+                }
+
+                const newCentroids = new Array(k).fill(0);
+                const counts = new Array(k).fill(0);
+                
+                for (let i = 0; i < data.length; i++) {
+                    const cluster = clusters[i];
+                    newCentroids[cluster] += scores[i];
+                    counts[cluster]++;
+                }
+                
+                for (let i = 0; i < k; i++) {
+                    if (counts[i] > 0) {
+                        newCentroids[i] /= counts[i];
+                    }
+                }
+
+                let totalMove = 0;
+                for (let i = 0; i < k; i++) {
+                    totalMove += Math.abs(centroids[i] - newCentroids[i]);
+                }
+                
+                if (totalMove < threshold) {
+                    moved = false;
+                }
+                
+                centroids = newCentroids;
+            }
+            
+            return clusters;
+        }
+
+        function generateColors(count) {
+            const colors = [];
+            for (let i = 0; i < count; i++) {
+                const hue = (i * 360 / count) % 360;
+                colors.push(`hsla(${hue}, 100%, 50%, 0.5)`);
+            }
+            return colors;
+        }
+
+        function generateSolidColors(count) {
+            const colors = [];
+            for (let i = 0; i < count; i++) {
+                const hue = (i * 360 / count) % 360;
+                colors.push(`hsl(${hue}, 100%, 60%)`);
+            }
+            return colors;
+        }
+    </script>
+</body>
+</html>
