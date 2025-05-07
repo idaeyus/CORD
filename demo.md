@@ -1,4 +1,4 @@
-# These are some demos using CoRD :
+# These are some demos using CORD :
 
 # 1. Giraffe 
 
