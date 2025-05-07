@@ -1,2 +1,2 @@
-# CoRD
+# CORD
 Compression Oriented Regional Division
